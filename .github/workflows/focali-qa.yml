@@ -1,0 +1,149 @@
+name: QA Deployment
+on:
+  push:
+    branches: dev
+  workflow_dispatch:
+concurrency:
+  group: qa-release-flow # cancel queued runnin
+  cancel-in-progress: true
+
+jobs:
+  agency-platform_QA_migrator:
+    runs-on: self-hosted
+    steps:
+      - name: notify start
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ github.repository }}, ${{ github.workflow }} \n \n Started Successfully"}]}}]}'
+      - name: Pull latest code from dev branch
+        run: |
+          cd C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/QA/aspnet-core/src/AgencyPlatform.DbMigrator
+          git pull origin dev    
+      - name: Install .NET Core 3.1.32 SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '3.1.x'         
+      - name: Build DbMigrator
+        run: dotnet build --configuration Debug AgencyPlatform.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/QA/aspnet-core/src/AgencyPlatform.DbMigrator 
+      - name: Run DbMigrator
+        run: dotnet run --configuration Debug --project AgencyPlatform.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/QA/aspnet-core/src/AgencyPlatform.DbMigrator
+      - name: notify failure
+        if: failure()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Failed!**"}]}}]}'
+      - name: notify cancelled
+        if: cancelled()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Cancelled!**"}]}}]}'
+  
+  agency-platform_QA_asp:
+    runs-on: self-hosted
+    needs: agency-platform_QA_migrator
+    env:
+      AZURE_WEBAPP_NAME: focal-qa-api
+      AZURE_WEBAPP_PACKAGE_PATH: src\AgencyPlatform.HttpApi.Host\publish # check path src publish
+      CONFIGURATION: Release
+      DOTNET_CORE_VERSION: 5.0.x
+      WORKING_DIRECTORY: aspnet-core\src\AgencyPlatform.HttpApi.Host
+    steps:
+      - uses: actions/checkout@v3   
+      - name: Restore
+        run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+      - name: Build
+        run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
+      - name: Publish
+        run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+      - name: Deploy to Azure WebApp
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE_QA }}
+          package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+      - name: notify failure
+        if: failure()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Failed!**"}]}}]}'
+      - name: notify cancelled
+        if: cancelled()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Cancelled!**"}]}}]}'
+          
+  agency-platform_QA_angular:
+    runs-on: self-hosted
+    needs: agency-platform_QA_asp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16.18.1' 
+      - name: yarn install global
+        run: npm install yarn
+      - name: Set Yarn to v3.3.1 locally    
+        run: |
+          corepack enable
+          corepack prepare yarn@3.3.1 --activate
+        working-directory: angular
+      - name: Import Yarn plugin
+        run: |
+          yarn plugin import version
+        working-directory: angular
+      - name: Run nodlinker
+        run: yarn config set nodeLinker node-modules
+      - name: Install dependencies
+        run: yarn install --immutable
+        working-directory: angular
+      - name: Run build script
+        run: yarn build:qa
+        working-directory: angular
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: focal-qa
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_QA }}
+          package: angular/dist/qa    
+      - name: Git changes
+        id: Git_changes
+        run: |
+          $version = (Get-Content angular\package.json | ConvertFrom-Json).version
+          git add angular\package.json
+          git commit -m "Version - $version"
+          git push
+          $latestTag = git describe --tags $(git rev-list --tags --max-count=1)
+          git push origin $latestTag
+          echo "::set-output name=latest_tag::$latestTag"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}        
+      - name: notify success
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ steps.push_changes.outputs.latest_tag }} ${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
+      - name: notify failure
+        if: failure()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Failed!**"}]}}]}'
+      - name: notify cancelled
+        if: cancelled()
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"**${{ github.repository }}, ${{ github.workflow }} \n \n Cancelled!**"}]}}]}'
