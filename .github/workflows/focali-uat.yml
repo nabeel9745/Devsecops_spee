@@ -1,0 +1,130 @@
+name: Production Deployment
+on:
+   workflow_dispatch:
+    inputs:
+      Tag-Name:
+        description: 'e.g., PROD_1.0.0'
+        required: true
+      Release-Name:
+        description: 'e.g., PROD v1.0.0'
+        required: true
+      Auth-Key:
+        description: 'Authentication key to start the workflow'
+        required: true
+
+jobs:
+  agency-platform_PROD_auth:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Auth-Key
+        run: |
+          if [ "${{ github.event.inputs.Auth-Key }}" != "${{ secrets.AUTH_KEY }}" ]; then
+            echo "Invalid Auth-Key"
+            exit 1
+          else
+            echo "Key correct. Proceeding with the workflow."
+          fi
+  
+  agency-platform_PROD_migrator:
+    runs-on: self-hosted
+    needs: agency-platform_PROD_auth
+    steps:
+      - name: Pull latest code from master branch
+        run: |
+          cd C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/PROD/aspnet-core/src/AgencyPlatform.DbMigrator
+          git pull origin master    
+      - name: Install .NET Core 3.1.32 SDK
+        uses: actions/setup-dotnet@v3
+        with:
+         dotnet-version: '3.1.x'         
+      - name: Build DbMigrator
+        run: dotnet build --configuration Debug AgencyPlatform.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/PROD/aspnet-core/src/AgencyPlatform.DbMigrator
+ 
+      - name: Run DbMigrator
+        run: dotnet run --configuration Debug --project AgencyPlatform.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Focali/PROD/aspnet-core/src/AgencyPlatform.DbMigrator
+   
+  agency-platform_PROD_asp:
+    runs-on: self-hosted
+    needs: agency-platform_PROD_migrator
+    env:
+     AZURE_WEBAPP_NAME: focali-api
+     AZURE_WEBAPP_PACKAGE_PATH: src\AgencyPlatform.HttpApi.Host\publish # check path src publish
+     CONFIGURATION: Release
+     DOTNET_CORE_VERSION: 5.0.x
+     WORKING_DIRECTORY: aspnet-core\src\AgencyPlatform.HttpApi.Host
+    steps:
+    - uses: actions/checkout@v3   
+    - name: Restore
+      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+    - name: Build
+      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
+    - name: Publish
+      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Deploy to Azure WebApp
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE_PROD }}
+        slot-name: stage
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+   
+  agency-platform_PROD_angular:
+    runs-on: self-hosted
+    needs: agency-platform_PROD_asp
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16.18.1' 
+    - name: yarn install global
+      run: npm install yarn
+    - name: Set Yarn to v3.3.1 locally    
+      run: |
+        corepack enable
+        corepack prepare yarn@3.3.1 --activate
+      working-directory: angular
+    - name: Import Yarn plugin
+      run: |
+        yarn plugin import version
+      working-directory: angular
+    - name: Run nodlinker
+      run: yarn config set nodeLinker node-modules
+    - name: Install dependencies
+      run: yarn install --immutable
+      working-directory: angular
+    - name: Run build script
+      run: yarn build:prod
+      working-directory: angular
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: focali
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_PROD }}
+        slot-name: stage
+        package: angular/dist/prod           
+   
+  create_release:
+    runs-on: self-hosted
+    needs: agency-platform_PROD_angular
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set Indian Date
+        id: set_date
+        run: |
+            $currentTimestamp = (Get-Date).AddHours(5.5).ToString('dd-MM-yyyy-HH-mm-ss')
+            echo "current_timestamp=$currentTimestamp" >> $env:GITHUB_ENV        
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.Tag-Name }}-${{ env.current_timestamp }}
+          release_name: ${{ github.event.inputs.Release-Name }}
+          draft: false
+          prerelease: false
+          commitish: master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
