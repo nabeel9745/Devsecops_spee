@@ -1,0 +1,82 @@
+name: QA Regression Test
+on:
+  repository_dispatch:
+    types:
+      - qa-deployment-completed
+  workflow_dispatch: 
+    inputs:
+      test_script:
+        description: "Select the NPM script to run"
+        required: true
+        default: "test:qa:chrome"
+        type: choice
+        options:
+          - "test:qa:chrome"
+          - "test:qa:msedge"
+
+jobs:
+  gcc-qa-regression-test:
+    timeout-minutes: 360
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*      
+      - uses: actions/setup-java@v4.7.0
+        with:
+          distribution: 'temurin' 
+          java-version: '21'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+      - name: Run Playwright Tests for Auto Trigger
+        id: run_test
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        run: npm run test:qa:chrome      
+      - name: Run Playwright Tests for Manual Trigger
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: npm run ${{ inputs.test_script }}
+      #- name: Generate Single Allure Report
+      #  if: ${{ always() && !cancelled() }}
+      #  run: npm run allure:generate:report
+      - name: Upload Test Reports
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: test-reports
+          path: test-reports/
+          retention-days: 30
+      - name: Upload Test Reports Without Media Files
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: test-report-without-media
+          path: test-reports/html-report/index.html
+          retention-days: 30    
+      - name: Send Execution Mail
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+
+              $ENV:PYTHONPATH = "C:\Program Files\Microsoft SDKs\Azure\CLI2"
+              $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              $status ="${{ steps.run_test.outcome }}"
+              $subject = if ($status -eq "success") { "QA Regression Tests Passed" } else { "QA Regression Tests Failed" }
+              $content = if ($status -eq "success") { "<p>All tests in automatic regression run - <b style='color:green;'>PASSED</b></p><p><a href='$runUrl'>Click here to view the run details</a></p>" } else { "<p>Some tests in automatic regression run - <b style='color:red;'>FAILED</b></p><p><a href='$runUrl'>Click here to view the run details</a></p>" }
+              # Report path (folder)
+              $reportFile = "$(Get-Location)\test-reports\html-report\index.html"
+              $zipPath = "$(Get-Location)\test-reports\test-report.zip"
+              # Remove old zip if exists
+              if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+              # Create zip of the report folder
+              Compress-Archive -Path $reportFile -DestinationPath $zipPath
+              az communication email send `
+                 --connection-string "endpoint=https://gs-email-service.india.communication.azure.com/;accesskey=" `
+                --sender "DoNotReply@ce2ebcbc-ca30-4627-89a2-b01e1df1f06b.azurecomm.net" `
+                --to "jibin.emmanuelpaul@speehive.com,jyothish.b@speehive.com" `
+                --subject $subject `
+                --html $content `
+                --attachments $zipPath `
+                --attachment-types zip
