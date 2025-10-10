@@ -1,0 +1,96 @@
+name: Commercial UAT Deployment
+
+on:
+  push:
+    branches:
+      - commercial/release
+  workflow_dispatch:
+concurrency:
+  group: gcuat-release-flow # cancel queued running
+  cancel-in-progress: true
+           
+jobs:
+  Commercial_UAT_migrator:
+    runs-on: self-hosted
+    steps:
+      - name: Pull latest code from commercial/release branch
+        run: |
+          cd C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoconnect/COMM/UAT/aspnet-core/src/GeoConnect.DbMigrator
+          git pull origin commercial/release 
+      - name: Build DbMigrator
+        run: dotnet build --configuration Debug GeoConnect.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoconnect/COMM/UAT/aspnet-core/src/GeoConnect.DbMigrator 
+      - name: Run DbMigrator
+        run: dotnet run --configuration Debug --project GeoConnect.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoconnect/COMM/UAT/aspnet-core/src/GeoConnect.DbMigrator
+  
+  Commercial_UAT_asp:
+    runs-on: self-hosted
+    needs: Commercial_UAT_migrator
+    env:
+     AZURE_WEBAPP_NAME: geoconnect-uat-api
+     AZURE_WEBAPP_PACKAGE_PATH: src\GeoConnect.HttpApi.Host\published
+     CONFIGURATION: Release
+     DOTNET_CORE_VERSION: 6.0.x
+     WORKING_DIRECTORY: aspnet-core\src\GeoConnect.HttpApi.Host
+    steps:
+    - uses: actions/checkout@v4
+    - name: Restore
+      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+    - name: Build
+      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
+    - name: Publish
+      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Deploy to Azure WebApp
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE_UAT }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+    - name: Deploy to Azure WebApp jobs
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: gc-uat-jobs
+        publish-profile: ${{ secrets.AZURE_JOBS_PUBLISH_PROFILE_UAT_GC }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+
+  Commercial_UAT_angular:
+    runs-on: self-hosted
+    needs: Commercial_UAT_asp
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20.10.0'
+    - name: Install Yarn
+      run: npm install -g yarn
+    - name: Install dependencies
+      run: yarn 
+      working-directory: angular
+    - name: Run build script
+      run: yarn build:uat
+      working-directory: angular
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: geoconnect-uat
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_UAT }}
+        package: angular/dist/uat      
+    - name: notify
+      shell: powershell
+      run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
+
+  Commercial_UAT_regression:
+    runs-on: self-hosted
+    needs: Commercial_UAT_angular
+    steps:
+     - name: Trigger
+       uses: peter-evans/repository-dispatch@v1
+       with:
+         token: ${{ secrets.V_GITHUB_PAT }} 
+         repository: Geoservedmcc/geo-connect-testautomation-
+         event-type: uat-deployment-completed
