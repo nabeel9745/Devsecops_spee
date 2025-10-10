@@ -1,0 +1,32 @@
+name: Sonarqube Analysis
+
+on:
+  schedule:
+    - cron: "30 17 * * 1-5"
+  workflow_dispatch :
+concurrency:
+  group: comm-sonar-flow # cancel queued running
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      with:
+        path: ${{ github.workspace }}
+        ref: commercial/dev
+    - name: Restore dependencies #just to run it again
+      run: dotnet restore ${{ github.workspace }}\aspnet-core\src\GeoConnect.HttpApi.Client\GeoConnect.HttpApi.Client.csproj  # Adjust path as necessary
+    - name: Build project
+      run: dotnet build ${{ github.workspace }}\aspnet-core\GeoConnect.sln # Adjust path
+    - name: SonarQube Scan
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      run: dotnet sonarscanner begin /k:"geo-connect" /d:sonar.host.url=${{ secrets.SONAR_HOST_URL }} /d:sonar.login=${{ secrets.SONAR_TOKEN }} /d:sonar.verbose=true /d:sonar.exclusions="**/Migrations/**, **/Migrations/**/*.cs, **/angular/src/app/proxy/**, **/angular/src/app/proxy/**/*.ts"
+    - name: Analyze the project
+      run: dotnet build ${{ github.workspace }}\aspnet-core\src\GeoConnect.HttpApi.Host\GeoConnect.HttpApi.Host.csproj --configuration Release  # Ensure it's built
+    - name: SonarQube End
+      run: dotnet sonarscanner end /d:sonar.login=${{ secrets.SONAR_TOKEN }}
