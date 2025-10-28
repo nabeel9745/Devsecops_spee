@@ -1,0 +1,34 @@
+name: DEV Deployment
+
+on:
+  workflow_dispatch:
+concurrency:
+  group: dev-flow # cancel queued running
+  cancel-in-progress: true
+  
+env:
+  AZURE_WEBAPP_PACKAGE_PATH: GPAnalytics\publish
+  CONFIGURATION: Release
+  WORKING_DIRECTORY: GPAnalytics
+
+jobs:
+  gp-analytics_DEV_build:
+    runs-on: self-hosted
+    environment: DEV
+    steps:
+    - uses: actions/checkout@v4 
+    - name: Dotnet Restore
+      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+    - name: Dotnet Build
+      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }}
+    - name: Dotnet Publish
+      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Update appsettings.json from GitHub Variables
+      shell: powershell
+      run: |
+        cd "${{ github.workspace }}\GPAnalytics\scripts"
+        .\updateAppSettings.ps1 -PackagePath "${{ github.workspace }}\${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Deploy to IIS on Azure VM using MSDeploy
+      shell: powershell
+      run: |
+        & "C:\Program Files (x86)\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:contentPath="${{ github.workspace }}\${{ env.AZURE_WEBAPP_PACKAGE_PATH }}" -dest:contentPath="${{ secrets.DEV_IIS_SITE_NAME }}",ComputerName="https://${{ secrets.DEV_VM_IP }}:8172/msdeploy.axd?site=${{ secrets.DEV_IIS_SITE_NAME }}",userName="${{ secrets.DEV_VM_USERNAME }}",password="${{ secrets.DEV_VM_PASSWORD }}",authType="Basic" -verbose -enableRule:DoNotDeleteRule -enableRule:AppOffline -allowUntrusted
