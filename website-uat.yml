@@ -1,0 +1,45 @@
+name: UAT Deployment
+
+on:
+  push:
+    branches:
+      - release
+  workflow_dispatch:
+concurrency:
+  group: uat-flow # cancel queued running
+  cancel-in-progress: true
+
+jobs:
+  gp-website_UAT_build:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20.10.0'
+    - name: Install dependencies
+      run: npm install --force
+    - name: Run build script
+      run: npm run build:uat
+    - name: deploy to vm
+      shell: powershell
+      run: |
+        .\upload.ps1 -ftpUser '${{ secrets.FTP_USER_UAT }}' -ftpPassword '${{ secrets.FTP_PASSWORD_UAT }}' -serverIp '${{ secrets.APP_SERVER_IP_UAT }}' -sourceFolderName 'uat' -subFolder 'website'
+    - name: notify
+      shell: powershell
+      run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
+  
+  gp-website_UAT_regression:
+   runs-on: self-hosted
+   needs: gp-website_UAT_build
+   steps:
+    - name: Trigger
+      uses: peter-evans/repository-dispatch@v1
+      with:
+         token: ${{ secrets.V_GITHUB_PAT }} 
+         repository: Geoservedmcc/vps_automation
+         event-type: uat-deployment-completed  
