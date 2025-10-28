@@ -1,0 +1,22 @@
+
+name: SonarQube Analysis
+
+on:
+  schedule:
+    - cron: "30 17 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout geo-perform-reports
+        uses: actions/checkout@v2     
+      - name: SonarQube Scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          dotnet sonarscanner begin /k:"gp-reportengine-api" /d:sonar.host.url=${{ secrets.SONAR_HOST_URL }} /d:sonar.login=${{ secrets.SONAR_TOKEN }} /d:sonar.verbose=true
+          dotnet build --configuration Release mod/ReportFramework.sln
+          dotnet sonarscanner end /d:sonar.login=${{ secrets.SONAR_TOKEN }}
