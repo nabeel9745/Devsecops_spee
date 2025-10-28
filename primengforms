@@ -1,0 +1,70 @@
+name: Production Deployment
+on:
+   workflow_dispatch:
+    inputs:
+      Tag-Name:
+        description: 'e.g., PROD_1.0.0'
+        required: true
+      Release-Name:
+        description: 'e.g., PROD v1.0.0'
+        required: true
+      Auth-Key:
+        description: 'Authentication key to start the workflow'
+        required: true
+
+jobs:
+  geo-perform-website-primeng-forms_PROD_auth:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Auth-Key
+        run: |
+          if [ "${{ github.event.inputs.Auth-Key }}" != "${{ secrets.AUTH_KEY }}" ]; then
+            echo "Invalid Auth-Key"
+            exit 1
+          else
+            echo "Key correct. Proceeding with the workflow."
+          fi
+          
+  geo-perform-website-primeng-forms_PROD_build_deploy:
+     runs-on: self-hosted
+     needs: geo-perform-website-primeng-forms_PROD_auth
+     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+         node-version: '20.10.0'
+      - name: Install dependencies
+        run: npm install --force
+      - name: Run build script
+        run: npm run build:prod
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: gf-prod
+          slot-name: stage
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_PROD }}
+          package: ./dist/prod    
+  
+  geo-perform-website-primeng-forms_PROD_create_release:
+    runs-on: self-hosted
+    needs: geo-perform-website-primeng-forms_PROD_build_deploy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set Indian Date
+        id: set_date
+        run: |
+            $currentTimestamp = (Get-Date).AddHours(5.5).ToString('dd-MM-yyyy-HH-mm-ss')
+            echo "current_timestamp=$currentTimestamp" >> $env:GITHUB_ENV        
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.Tag-Name }}-${{ env.current_timestamp }}
+          release_name: ${{ github.event.inputs.Release-Name }}
+          draft: false
+          prerelease: false
+          commitish: master 
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
