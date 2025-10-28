@@ -1,0 +1,101 @@
+name: QA Deployment
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+    inputs:
+      report-api-branch:
+        description: 'The branch for report-api'
+        required: true
+        default: 'dev'
+
+concurrency:
+  group: report-api-Qa-flow    
+  cancel-in-progress: true
+
+env:
+  AZURE_WEBAPP_NAME: gp-qa-report-api
+  AZURE_WEBAPP_PACKAGE_PATH: ReportsAPICore\publish
+  CONFIGURATION: Release
+  WORKING_DIRECTORY: ReportsAPICore   
+  
+jobs:
+  gp_report_api_build:
+    runs-on: self-hosted
+    steps:
+    - name: Determine branches to use
+      id: branches
+      shell: powershell
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          "report_api_branch=${{ github.event.inputs.report-api-branch }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        } else {
+          "report_api_branch=dev" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        }
+    - name: Checkout gp-report-api
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '0'
+        repository: Geoservedmcc/gp-report-api
+        path: gp-report-api
+        ref: ${{ steps.branches.outputs.report_api_branch }}
+    
+    - name: AWS CodeArtifact login for .NET
+      run: aws codeartifact login --tool dotnet --domain geoperform --domain-owner 528757795959 --repository geoperform-artifacts --region ap-south-1
+
+    - name: Restore dependencies
+      run: |
+          dotnet restore gp-report-api/ReportsAPICore/ReportsAPICore.csproj    
+    
+    - name: Build project
+      run: dotnet build gp-report-api/ReportsAPICore/ReportsAPICore.csproj --configuration Release
+
+    - name: Dotnet Publish
+      run:  dotnet publish gp-report-api/ReportsAPICore/ReportsAPICore.csproj --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+
+    
+    - name: Deploy to IIS on Azure VM using MSDeploy
+      shell: powershell
+      run: |
+        & "C:\Program Files (x86)\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:contentPath="${{ github.workspace }}\${{ env.AZURE_WEBAPP_PACKAGE_PATH }}" -dest:contentPath='${{ secrets.QA_IIS_SITE_NAME }}',ComputerName="https://${{ secrets.QA_VM_IP }}:8172/msdeploy.axd?site=${{ secrets.QA_IIS_SITE_NAME }}",userName='${{ secrets.QA_VM_USERNAME }}',password='${{ secrets.QA_VM_PASSWORD }}',authType='Basic' -verbose -enableRule:DoNotDeleteRule -enableRule:AppOffline -allowUntrusted
+    # - name: Deploy to Azure WebApp
+    #   uses: azure/webapps-deploy@v2
+    #   with:
+    #       app-name: gp-qa-report-api
+    #       publish-profile: ${{ secrets.gp_qa_report_api_Publish_profile }}
+    #       package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+
+  tag:
+    runs-on: self-hosted
+    needs: gp_report_api_build
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+         fetch-depth: '0'
+      # - name: Get Latest Tag
+      #   id: get_tag
+      #   run: |
+      #     $latestTag = git describe --tags $(git rev-list --tags --max-count=1)
+      #     echo "::set-output name=tag::$latestTag"
+      # - name: Increment Tag
+      #   id: increment_tag
+      #   run: |
+      #     $tag = "${{ steps.get_tag.outputs.tag }}"
+      #     $versionParts = $tag.Split('.')
+      #     $lastPart = [int]$versionParts[-1]
+      #     $newLastPart = $lastPart + 1
+      #     $newTag = "$($versionParts[0]).$($versionParts[1]).$newLastPart"
+      #     echo "::set-output name=new_tag::$newTag"
+      # - name: Create New Tag
+      #   run: |
+      #     $newTag = "${{ steps.increment_tag.outputs.new_tag }}"
+      #     git tag $newTag
+      #     git push origin $newTag
+      - name: notify
+        shell: powershell
+        run: |
+           $url = "${{ secrets.TEAMS_HOOK }}"
+           Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ steps.increment_tag.outputs.new_tag }} ${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
