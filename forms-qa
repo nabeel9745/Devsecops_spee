@@ -1,0 +1,91 @@
+name: QA Deployment
+on:
+  push:
+    branches:
+    - dev
+  workflow_dispatch:
+concurrency:
+  group: qa-api-flow # cancel queued running
+  cancel-in-progress: true
+  
+jobs:
+  geo-forms_QA_migrator:
+    runs-on: self-hosted
+    steps:
+      - name: Pull latest code from dev branch
+        run: |
+          cd C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoforms/QA/aspnet-core/src/GeoForms.DbMigrator
+          git pull origin dev 
+      - name: Build DbMigrator
+        run: dotnet build --configuration Debug GeoForms.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoforms/QA/aspnet-core/src/GeoForms.DbMigrator 
+      - name: Run DbMigrator
+        run: dotnet run --configuration Debug --project GeoForms.DbMigrator.csproj
+        working-directory: C:/Users/sh-auto-vm-user/source/actions-runner/SpeeHive/Geoforms/QA/aspnet-core/src/GeoForms.DbMigrator
+  
+  geo-forms_QA_build_deploy:
+    runs-on: self-hosted
+    needs: geo-forms_QA_migrator
+    env:
+      AZURE_WEBAPP_NAME: geoforms-qa-api
+      AZURE_WEBAPP_PACKAGE_PATH: src\GeoForms.HttpApi.Host\published
+      CONFIGURATION: Release
+      DOTNET_CORE_VERSION: 7.0.x
+      WORKING_DIRECTORY: aspnet-core\src\GeoForms.HttpApi.Host
+    steps:
+    - uses: actions/checkout@v4
+      with:
+         fetch-depth: '0'
+    - name: Restore
+      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
+    - name: Build
+      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
+    - name: Publish
+      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+    - name: Deploy to Azure WebApp
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE_QA }}
+        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+    - name: Get Latest Tag
+      id: get_tag
+      run: |
+        $latestTag = git describe --tags $(git rev-list --tags --max-count=1)
+        echo "tag=$latestTag" >> $env:GITHUB_OUTPUT
+
+    - name: Increment Tag
+      id: increment_tag
+      run: |
+        $tag = "${{ steps.get_tag.outputs.tag }}"
+
+        if ($tag -match '^v\d+\.\d+\.\d+$') {
+          # Semantic versioning
+          $versionParts = $tag.TrimStart('v').Split('.')
+          $lastPart = [int]$versionParts[-1]
+          $newLastPart = $lastPart + 1
+          $newTag = "v$($versionParts[0]).$($versionParts[1]).$newLastPart"
+        }
+        elseif ($tag -like 'PROD*') {
+          # Timestamp style
+          $timestamp = Get-Date -Format "MM-dd-yyyy-HH-mm-ss"
+          $newTag = "PROD_$timestamp"
+        }
+        else {
+          Write-Error "Unsupported tag format: $tag"
+          exit 1
+        }
+
+        echo "new_tag=$newTag" >> $env:GITHUB_OUTPUT
+
+    - name: Create New Tag
+      run: |
+        $newTag = "${{ steps.increment_tag.outputs.new_tag }}"
+        git tag $newTag
+        git push origin $newTag
+
+    - name: notify
+      shell: powershell
+      run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ steps.increment_tag.outputs.new_tag }} ${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
