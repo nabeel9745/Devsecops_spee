@@ -1,0 +1,89 @@
+name: QA Deployment
+
+on:
+  push:
+    branches:
+    - dev
+  workflow_dispatch:
+    inputs:
+      master-api-branch:
+        description: 'The branch for master-api'
+        required: true
+        default: 'dev'
+      
+concurrency:
+  group: qa-flow # cancel queued running
+  cancel-in-progress: true
+
+env:
+  AZURE_WEBAPP_PACKAGE_PATH: MastersProject\publish
+  CONFIGURATION: Release
+  WORKING_DIRECTORY: MastersProject
+
+jobs:
+  gp-master-api_QA_build:
+    runs-on: self-hosted
+    environment: QA
+    steps:
+      - name: Determine branches to use
+        id: branches
+        shell: powershell
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "master_api_branch=${{ github.event.inputs.master-api-branch }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "master_api_branch=dev" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      # Login to CodeArtifact for NuGet/.NET
+      - name: AWS CodeArtifact login for .NET
+        run: aws codeartifact login --tool dotnet --domain geoperform --domain-owner 528757795959 --repository geoperform-artifacts --region ap-south-1
+
+      - name: Checkout gp-master-api
+        uses: actions/checkout@v4
+        with:
+          repository: Geoservedmcc/gp-master-api
+          path: gp-master-api
+          ref: ${{ steps.branches.outputs.master_api_branch }}
+      
+      - name: SonarQube Begin Analysis
+        run: |
+          cd gp-master-api\MastersProject
+          dotnet sonarscanner begin /k:"gp-master-api" /d:sonar.host.url=${{ secrets.SONAR_HOST_URL }} /d:sonar.login=${{ secrets.SONAR_TOKEN }} /d:sonar.verbose=true
+      - name: Restore and Build geo-perform-master-api
+        run: |
+          cd gp-master-api\MastersProject
+          dotnet build --configuration Release
+      - name: SonarQube End Analysis
+        run:  |
+          cd gp-master-api\MastersProject
+          dotnet sonarscanner end /d:sonar.login=${{ secrets.SONAR_TOKEN }}
+      - name: Dotnet Publish
+        run:  |
+          cd gp-master-api
+          dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+      - name: Update appsettings.json from GitHub Variables
+        shell: powershell
+        run: |
+          cd "${{ github.workspace }}\gp-master-api\MastersProject\scripts"
+          .\updateAppSettings.ps1 -PackagePath "${{ github.workspace }}\gp-master-api\${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
+      - name: Deploy to IIS on Azure VM using MSDeploy
+        shell: powershell
+        run: |
+           & "C:\Program Files (x86)\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:contentPath="${{ github.workspace }}\gp-master-api\${{ env.AZURE_WEBAPP_PACKAGE_PATH }}" -dest:contentPath="${{ secrets.QA_IIS_SITE_NAME }}",ComputerName="https://${{ secrets.QA_VM_IP }}:8172/msdeploy.axd?site=${{ secrets.QA_IIS_SITE_NAME }}",userName="${{ secrets.QA_VM_USERNAME }}",password="${{ secrets.QA_VM_PASSWORD }}",authType="Basic" -verbose -enableRule:DoNotDeleteRule -enableRule:AppOffline -allowUntrusted
+      - name: notify
+        shell: powershell
+        run: |
+          $url = "${{ secrets.TEAMS_HOOK }}"
+          Invoke-WebRequest -Uri $url -Method POST -ContentType "application/json" -Body '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.text","content":{"type":"message","body":[{"type":"text","text":"${{ github.repository }}, ${{ github.workflow }} \n \n Completed Successfully!"}]}}]}'
+    
+  gp-master-api_QA_regression:
+      runs-on: self-hosted
+      needs: gp-master-api_QA_build
+      steps:
+      - name: Trigger
+        uses: peter-evans/repository-dispatch@v1
+        with:
+          token: ${{ secrets.V_GITHUB_PAT }} 
+          repository: Geoservedmcc/vps_automation
+          event-type: qa-deployment-completed
