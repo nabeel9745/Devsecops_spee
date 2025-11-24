@@ -1,0 +1,45 @@
+options:
+  max-time: 720
+pipelines:
+  custom:
+    non-regression-test:
+      - variables:
+          - name: TEST_SCRIPT
+            default: "FullTest:Chrome"
+            allowed-values:
+              - "FullTest:Chrome"
+              - "FullTest:MSEdge"
+              - "Accruals:Chrome"
+              - "Accruals:MSEdge"
+              - "PDA-FDA-PaymentTest:Chrome"
+              - "PDA-FDA-PaymentTest:MSEdge"
+      - step:
+          name: Non Regression Test
+          runs-on:
+            - self.hosted
+            - linux.shell  # or any label you assigned to your runner
+            - d365runner
+          script:
+            - echo "Running on self-hosted runner"
+            - export PIPELINE_STATUS=0 
+            - sudo apt-get update && sudo apt-get install -y ffmpeg
+            - ffmpeg -version
+            - node -v  # confirm Node installed
+            - java -version  # confirm Java installed
+            - npm install
+            - npx playwright install --with-deps
+            - npm run ${TEST_SCRIPT} || export PIPELINE_STATUS=1
+            - if [ -f scripts/optimize_videos.sh ]; then echo "Running video optimization script..."; chmod +x scripts/optimize_videos.sh; ./scripts/optimize_videos.sh; else echo "Video optimization script not found, skipping."; fi
+
+            - export UNIQUE_ID="$(date +"%Y-%m-%d %H:%M:%S")"
+            - export ZIP_NAME="final-test-report-${UNIQUE_ID}.zip"
+            - zip -r "${ZIP_NAME}" test-reports downloads test-data
+            - azcopy copy "${ZIP_NAME}" "https://sgnrtgchd365sa01.blob.core.windows.net/nrtgch-data/${ZIP_NAME}?sp=racwdl&st=2025-07-18T09:02:17Z&se=2027-07-18T17:17:17Z&spr=https&sv=2024-11-04&sr=c&sig=zBVWj0R0EFITYKmUgw2pZANW%2F%2BGdVNu%2BcNVA8gIQrcI%3D" --overwrite=true
+            - rm -f ${ZIP_NAME}
+            - echo "<html><head><meta http-equiv='refresh' content='0; url=https://sgnrtgchd365sa01.blob.core.windows.net/nrtgch-data/${ZIP_NAME}?sp=racwdl&st=2025-07-18T09:02:17Z&se=2027-07-18T17:17:17Z&spr=https&sv=2024-11-04&sr=c&sig=zBVWj0R0EFITYKmUgw2pZANW%2F%2BGdVNu%2BcNVA8gIQrcI%3D' /></head><body>If not redirected, <a href='https://sgnrtgchd365sa01.blob.core.windows.net/nrtgch-data/${ZIP_NAME}?sp=racwdl&st=2025-07-18T09:02:17Z&se=2027-07-18T17:17:17Z&spr=https&sv=2024-11-04&sr=c&sig=zBVWj0R0EFITYKmUgw2pZANW%2F%2BGdVNu%2BcNVA8gIQrcI%3D'>click here</a>.</body></html>" > Final-Test-Report.html
+            - if [ "$PIPELINE_STATUS" -eq 1 ]; then
+              echo "Test execution failed.";
+              exit 1;
+             fi
+          artifacts:
+            - Final-Test-Report.html
