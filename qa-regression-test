@@ -1,0 +1,59 @@
+
+name: QA Regression Test
+
+on:
+  repository_dispatch:
+    types:
+      - qa-deployment-completed
+  workflow_dispatch:
+
+jobs:
+  run-login:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright
+        run: npx playwright install
+
+      - name: Run Login Test
+        run: npx playwright test tests/gitscheduleconfig/login_qa.spec.ts
+
+      - name: Upload Playwright HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+
+  notify:
+    runs-on: self-hosted
+    if: always()
+    needs: run-login
+    steps:
+      - name: Download Playwright Report
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report
+          path: report
+
+      - name: Send report to Teams
+        shell: powershell
+        run: |
+          $headers = @{ "Content-Type" = "application/json" }
+          $reportUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts"
+          $body = @"
+          {
+            "text": "✅ QA Regression Test completed. View the Playwright HTML Report"
+          }
+          "@
+          $url = "https://speehive0.webhook.office.com/webhookb2/77306c40-6455-4bf4-8726-1c1f7ff227c4@99ceedc4-9f13-4937-8f76-cf4e1b0b7b68/IncomingWebhook/055182941baf4a1fb77390b7038dfb42/6fd333f8-0d9c-445d-a523-3e47ee7a6bfa/V2f5JlERnOaEiyvp_J4ka_jXeP4Q_F0i0rsiyoMLaqRKM1"
+          Invoke-WebRequest -Uri $url -Method POST -Headers $headers -Body $body
